@@ -3,22 +3,27 @@ import torch
 import os
 
 
-os.environ["CUDA_VISIBLE_DEVICES"] = '0'
+#os.environ["CUDA_VISIBLE_DEVICES"] = '0'
+#disable for amd
 
-
-model_name = 'deepseek-ai/DeepSeek-OCR'
+model_name = 'deepseek-ai/deepseek-ocr'
 
 
 tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-model = AutoModel.from_pretrained(model_name, _attn_implementation='flash_attention_2', trust_remote_code=True, use_safetensors=True)
+model = AutoModel.from_pretrained(
+    model_name, 
+    _attn_implementation='eager',  # Changed from 'flash_attention_2'
+    trust_remote_code=True, 
+    use_safetensors=True
+)
 model = model.eval().cuda().to(torch.bfloat16)
 
 
 
 # prompt = "<image>\nFree OCR. "
-prompt = "<image>\n<|grounding|>Convert the document to markdown. "
-image_file = 'your_image.jpg'
-output_path = 'your/output/dir'
+prompt = "<image>\n<|grounding|>describe the picture "
+image_file = '/home/jules/Pictures/photo_2024-03-19_18-43-16.jpg'
+output_path = './'
 
 
 
