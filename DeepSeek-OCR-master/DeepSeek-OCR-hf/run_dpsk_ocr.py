@@ -16,7 +16,10 @@ model = AutoModel.from_pretrained(
     trust_remote_code=True, 
     use_safetensors=True
 )
-model = model.eval().cuda().to(torch.bfloat16)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model = model.eval().to(device)
+if torch.cuda.is_available():
+    model = model.to(torch.bfloat16)
 
 
 
