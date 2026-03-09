@@ -23,8 +23,8 @@ if torch.cuda.is_available():
 
 
 # prompt = "<image>\nFree OCR. "
-prompt = "<image>\n<|grounding|>put a frame around each of the building that you can see in the picture"
-image_file = "/home/jules/Pictures/tai-mo-shan-fun-fact-1920x1080.jpg"
+prompt = "<image>\n<|grounding|>Convert the document to markdown."
+image_file = "/home/jules/Pictures/Screenshots/Screenshot from 2026-03-09 17-42-30.png"
 output_path = "./"
 
 
@@ -43,8 +43,8 @@ res = model.infer(
     image_file=image_file,
     output_path=output_path,
     base_size=1024,
-    image_size=640,
-    crop_mode=True,
+    image_size=1024,
+    crop_mode=False,
     save_results=True,
     test_compress=True,
 )
