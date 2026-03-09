@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-OCR Benchmark Image Generator - Debug Version
+OCR Benchmark Image Generator - With Alignment and Skip Existing
 """
 
 import os
@@ -74,6 +74,9 @@ CANVAS_SIZE = 1024
 OUTPUT_DIR = Path("./ocr_benchmark_images")
 SCALES = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5]
 ASPECT_RATIOS = [16.0, 8.0, 4.0, 2.0, 1.0, 0.5, 0.25, 0.125, 0.0625]
+
+# CONFIGURATION
+ALIGNMENTS = ["center", "left"]  # Generate both centered and left-aligned versions
 
 def preprocess(text):
     import re
@@ -167,6 +170,7 @@ def load_font(name, size):
     
     print(f"    WARNING: Could not load {name} at {size}pt, using default")
     return ImageFont.load_default()    
+
 def wrap_text(font, text, max_width):
     """Return wrapped lines and dimensions."""
     lines = []
@@ -211,10 +215,20 @@ def find_max_size(font_name):
         else:
             high = mid - 1
     return best
-def generate(font_name, font_size, ar, scale):
-    linear_scale = scale / 100.0 if scale > 1 else scale  # Handle both 0.9 and 90
-    if scale > 1:
-        scale = int(scale)
+
+def check_existing(font_name, scale, ar, alignment, dims):
+    """Check if image already exists."""
+    ar_str = f"{ar:.2f}".replace('.', 'p')
+    fname = f"{font_name.replace(' ', '_')}_scale{int(scale*100):03d}_ar{ar_str}_align-{alignment}_{dims[0]}x{dims[1]}.png"
+    fpath = OUTPUT_DIR / fname
+    return fpath.exists(), fname, fpath
+
+def generate(font_name, font_size, ar, scale, alignment="center"):
+    """
+    Generate image with specified alignment.
+    alignment: "center" or "left"
+    """
+    linear_scale = scale / 100.0 if scale > 1 else scale
     
     # Calculate box
     area = (CANVAS_SIZE * linear_scale) ** 2
@@ -227,13 +241,18 @@ def generate(font_name, font_size, ar, scale):
     lines, text_w, text_h = wrap_text(font, CLEAN_TEXT, w)
     
     # DEBUG INFO
-    info = f"  Scale {scale}%, AR {ar}: Box {w}x{h}, Text {text_w:.0f}x{text_h:.0f}, Lines {len(lines)}"
+    info = f"  Scale {scale}%, AR {ar}, Align {alignment}: Box {w}x{h}, Text {text_w:.0f}x{text_h:.0f}"
     
     if text_h > h or text_w > w:
-        return None, info + f" -> NO FIT (need height {text_h:.0f} > {h})"
+        return None, info + f" -> NO FIT"
     
-    # Create image - draw directly at final size, no canvas padding
-    # We create a temporary image just big enough for the text
+    # Check if already exists BEFORE creating image
+    dims_preview = (int(min(text_w + 20, CANVAS_SIZE)), int(min(text_h + 20, CANVAS_SIZE)))
+    exists, fname, fpath = check_existing(font_name, scale, ar, alignment, dims_preview)
+    if exists:
+        return None, info + f" -> EXISTS (skipped {fname})"
+    
+    # Create image
     margin = 10
     img_w = int(min(text_w + margin*2, CANVAS_SIZE))
     img_h = int(min(text_h + margin*2, CANVAS_SIZE))    
@@ -247,16 +266,28 @@ def generate(font_name, font_size, ar, scale):
         if line:
             bbox = font.getbbox(line)
             line_w = bbox[2] - bbox[0]
-            x = (img_w - line_w) // 2  # Center horizontally
+            
+            # Alignment logic
+            if alignment == "center":
+                x = (img_w - line_w) // 2  # Center horizontally
+            else:  # left
+                x = margin  # Left align with margin
+            
             draw.text((x, int(y)), line, font=font, fill='black')
         y += line_h
     
-    # Tight crop to actual text (remove any remaining margin)
+    # Tight crop
     bbox = img.getbbox()
     if bbox:
         img = img.crop(bbox)
     
-    return img, info + f" -> Generated {img.size}"
+    # Save with updated filename including alignment
+    final_fname = f"{font_name.replace(' ', '_')}_scale{int(scale*100):03d}_ar{ar:.2f}".replace('.', 'p')
+    final_fname += f"_align-{alignment}_{img.size[0]}x{img.size[1]}.png"
+    final_path = OUTPUT_DIR / final_fname
+    img.save(final_path)
+    
+    return img, info + f" -> Generated {final_fname}"
 
 def main():
     OUTPUT_DIR.mkdir(exist_ok=True)
@@ -268,9 +299,9 @@ def main():
         
         max_size = find_max_size(font_name)
         print(f"Max font size for 1024x1024: {max_size}pt")
-        print(f"Text length: {len(CLEAN_TEXT)} chars")
         
         generated = 0
+        skipped = 0
         failed = 0
         
         # Generate for all combinations
@@ -278,20 +309,18 @@ def main():
             font_sz = int(max_size * scale)
             
             for ar in ASPECT_RATIOS:
-                img, info = generate(font_name, font_sz, ar, int(scale*100))
-                print(info)
-                
-                if img:
-                    ar_str = f"{ar:.2f}".replace('.', 'p')
-                    fname = f"{font_name.replace(' ', '_')}_scale{int(scale*100):03d}_ar{ar_str}_{img.size[0]}x{img.size[1]}.png"
-                    img.save(OUTPUT_DIR / fname)
-                    generated += 1
-                else:
-                    failed += 1
+                for alignment in ALIGNMENTS:
+                    img, info = generate(font_name, font_sz, ar, scale, alignment)
+                    print(info)
+                    
+                    if img:
+                        generated += 1
+                    elif "EXISTS" in info:
+                        skipped += 1
+                    else:
+                        failed += 1
         
-        print(f"\nSUMMARY: Generated {generated}, Failed {failed}")
-        print("Hint: If Failed is high, the text is too long for small scales.")
-        print("      Try using a shorter SAMPLE_TEXT (e.g., just one paragraph).")
+        print(f"\nSUMMARY: Generated {generated}, Skipped {skipped}, Failed {failed}")
 
 if __name__ == "__main__":
     main()
