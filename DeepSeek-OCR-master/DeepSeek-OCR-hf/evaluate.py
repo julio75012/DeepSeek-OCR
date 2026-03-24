@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-DeepSeek-OCR Evaluation - DEBUG VERSION
-Runs inference on the first image found, saves clean OCR text as .txt
-alongside the source image, then prints diagnostic info.
-Compares OCR output against ground truth using edit distance.
+DeepSeek-OCR Evaluation
+Runs inference on all images found in INPUT_DIR across all configured modes,
+saves clean OCR text as .txt alongside the source image, computes edit-distance
+accuracy and compression ratio, and persists results to a CSV file.
+
+Supports resumption: previously computed (image, mode) pairs found in the CSV
+are skipped automatically.
 """
 
+import csv
 import os
 import re
 import sys
@@ -14,6 +18,7 @@ from pathlib import Path
 from contextlib import redirect_stdout, redirect_stderr
 from transformers import AutoModel, AutoTokenizer
 import torch
+import Levenshtein
 
 # ============================================================================
 # CONFIGURATION
@@ -30,6 +35,9 @@ INPUT_DIR = Path("./ocr_benchmark_images")
 OUTPUT_DIR = Path("./ocr_benchmark_text")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
+RESULTS_CSV = OUTPUT_DIR / "results.csv"
+CSV_COLUMNS = ["image", "mode", "accuracy", "compression_ratio", "edit_distance", "ocr_length"]
+
 GROUND_TRUTH_FILE = Path(__file__).parent / "ground_truth.txt"
 
 # ============================================================================
@@ -42,6 +50,36 @@ def load_ground_truth() -> str:
         print(f"ERROR: Ground truth file not found: {GROUND_TRUTH_FILE}")
         sys.exit(1)
     return GROUND_TRUTH_FILE.read_text(encoding="utf-8").strip()
+
+# ============================================================================
+# CSV RESUME HELPERS
+# ============================================================================
+
+def load_completed_keys(csv_path: Path) -> set[tuple[str, str]]:
+    """
+    Load already-computed (image, mode) pairs from the CSV file.
+    Returns a set of (image_filename, mode_name) tuples.
+    """
+    completed = set()
+    if csv_path.exists():
+        with open(csv_path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                completed.add((row["image"], row["mode"]))
+    return completed
+
+
+def append_result_row(csv_path: Path, row: dict) -> None:
+    """
+    Append a single result row to the CSV file.
+    Creates the file with headers if it does not yet exist.
+    """
+    write_header = not csv_path.exists() or csv_path.stat().st_size == 0
+    with open(csv_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
 
 # ============================================================================
 # MODEL LOADING
@@ -64,14 +102,16 @@ print(f"Model loaded on {device}")
 # HELPERS
 # ============================================================================
 
-def find_first_image(input_dir: Path) -> Path:
-    """Return the first image found (png/jpg/jpeg) or exit."""
+def find_all_images(input_dir: Path) -> list[Path]:
+    """Return all images found (png/jpg/jpeg), sorted for determinism."""
+    images = []
     for ext in ("*.png", "*.jpg", "*.jpeg"):
-        images = sorted(input_dir.rglob(ext))
-        if images:
-            return images[0]
-    print(f"ERROR: No images found under {input_dir}")
-    sys.exit(1)
+        images.extend(input_dir.rglob(ext))
+    images = sorted(set(images))
+    if not images:
+        print(f"ERROR: No images found under {input_dir}")
+        sys.exit(1)
+    return images
 
 
 def run_inference(image_path: Path, mode_config: dict) -> tuple[str, str, object]:
@@ -120,9 +160,6 @@ def strip_grounding_tags(text: str) -> str:
     # Remove any other remaining special tokens of the form <|...|>
     text = re.sub(r'<\|[^|]*\|>', '', text)
     # Collapse 3+ consecutive newlines into exactly 2 newlines.
-    # The original regex r'{3,}' was missing the escaped \n, causing
-    # re.error ("nothing to repeat") because the unescaped '{' was
-    # interpreted as a repetition quantifier with nothing preceding it.
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
@@ -152,12 +189,9 @@ def extract_ocr_text(stdout_text: str) -> str:
 
     if len(parts) >= 3:
         # parts[0] = before first separator (empty or preamble)
-        # parts[1] = "BASE: ...
-# NO PATCHES
-# " header block
+        # parts[1] = "BASE: ... / NO PATCHES / " header block
         # parts[2] = actual OCR content
         # parts[3..] = stats footer ("image size: ..." etc.)
-        # Take everything between the header block and the stats footer
         ocr_body = parts[2] if len(parts) > 2 else ""
     else:
         # Fallback: use entire stdout
@@ -182,42 +216,68 @@ def save_ocr_text(image_path: Path, mode_name: str, ocr_text: str) -> Path:
 
 def main():
     ground_truth = load_ground_truth()
+    gt_normalized = " ".join(ground_truth.split()).lower()
     print(f"Ground truth loaded: {len(ground_truth)} chars")
 
-    image_path = find_first_image(INPUT_DIR)
-    print(f"Selected image: {image_path}")
+    images = find_all_images(INPUT_DIR)
+    print(f"Found {len(images)} image(s) in {INPUT_DIR}")
+
+    # Load already-computed results to enable resumption
+    completed = load_completed_keys(RESULTS_CSV)
+    if completed:
+        print(f"Resuming: {len(completed)} (image, mode) pair(s) already computed -- will be skipped.")
     print()
 
-    for mode_name, mode_config in MODES.items():
-        print(f"--- Running mode: {mode_name} ---")
+    total_pairs = len(images) * len(MODES)
+    done_count = len(completed)
 
-        stdout_text, stderr_text, return_value = run_inference(image_path, mode_config)
+    for img_idx, image_path in enumerate(images, start=1):
+        image_name = image_path.name
+        print(f"[Image {img_idx}/{len(images)}] {image_name}")
 
-        ocr_text = extract_ocr_text(stdout_text)
+        for mode_name, mode_config in MODES.items():
+            key = (image_name, mode_name)
 
-        txt_path = save_ocr_text(image_path, mode_name, ocr_text)
-        print(f"  OCR text written to: {txt_path}")
-        print(f"  OCR text length: {len(ocr_text)} chars")
+            if key in completed:
+                done_count_display = done_count  # already counted
+                print(f"  {mode_name:>6s}: SKIPPED (already computed)")
+                continue
 
-        # Compute edit distance metrics
-        if ocr_text:
-            import Levenshtein
-            pred = " ".join(ocr_text.split()).lower()
-            gt = " ".join(ground_truth.split()).lower()
-            ed = Levenshtein.distance(pred, gt)
-            max_len = max(len(pred), len(gt))
-            acc = max(0, (1 - ed / max_len) * 100) if max_len > 0 else 0.0
-            comp = len(ocr_text) / mode_config["vision_tokens"]
+            stdout_text, stderr_text, return_value = run_inference(image_path, mode_config)
+            ocr_text = extract_ocr_text(stdout_text)
+            save_ocr_text(image_path, mode_name, ocr_text)
 
-            print(f"  Edit Distance:     {ed}")
-            print(f"  Accuracy:          {acc:.1f}%")
-            print(f"  Compression Ratio: {comp:.1f}x")
-        else:
-            print(f"  WARNING: empty OCR output")
+            # Compute metrics
+            if ocr_text:
+                pred_normalized = " ".join(ocr_text.split()).lower()
+                ed = Levenshtein.distance(pred_normalized, gt_normalized)
+                max_len = max(len(pred_normalized), len(gt_normalized))
+                acc = max(0.0, (1 - ed / max_len) * 100) if max_len > 0 else 0.0
+                comp = len(ocr_text) / mode_config["vision_tokens"]
+            else:
+                ed = len(gt_normalized)
+                acc = 0.0
+                comp = 0.0
+
+            # Persist result row immediately (crash-safe resumption)
+            row = {
+                "image": image_name,
+                "mode": mode_name,
+                "accuracy": f"{acc:.2f}",
+                "compression_ratio": f"{comp:.2f}",
+                "edit_distance": ed,
+                "ocr_length": len(ocr_text),
+            }
+            append_result_row(RESULTS_CSV, row)
+            completed.add(key)
+            done_count += 1
+
+            print(f"  {mode_name:>6s}: Acc={acc:5.1f}%  ED={ed:5d}  Comp={comp:5.1f}x  Len={len(ocr_text)}  [{done_count}/{total_pairs}]")
 
         print()
 
-    print("Done. Inspect .txt files in:", OUTPUT_DIR)
+    print(f"All done. Results saved to: {RESULTS_CSV}")
+    print(f"OCR text files in: {OUTPUT_DIR}")
 
 
 if __name__ == "__main__":
