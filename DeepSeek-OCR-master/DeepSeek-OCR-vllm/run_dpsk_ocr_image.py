@@ -1,19 +1,76 @@
 import asyncio
 import re
 import os
+import sys
+import subprocess
+import pkg_resources
 
+# First, check for missing dependencies before proceeding
+REQUIRED_PACKAGES = ['flash-attn']
+
+def check_dependencies():
+    """Check if required packages are installed."""
+    missing_packages = []
+    for package in REQUIRED_PACKAGES:
+        try:
+            # Try to find the package using pkg_resources
+            # flash-attn might be installed as flash_attn in Python imports
+            dist = pkg_resources.get_distribution(package)
+            print(f"✓ Found {dist.project_name} version {dist.version}")
+        except pkg_resources.DistributionNotFound:
+            missing_packages.append(package)
+    
+    if missing_packages:
+        print(f"\n❌ Missing required packages: {missing_packages}")
+        print("\nTo install flash-attn, run one of the following commands:")
+        print("1. For standard installation:")
+        print("   pip install flash-attn")
+        print("\n2. If you have CUDA 11.8 (which you seem to have based on the error):")
+        print("   pip install flash-attn --index-url https://download.pytorch.org/whl/cu118")
+        print("\n3. For the latest version with pip:")
+        print("   pip install flash-attn --no-build-isolation")
+        print("\n4. If you want to install from source:")
+        print("   pip install git+https://github.com/Dao-AILab/flash-attention.git")
+        print("\nAfter installing, please run this script again.")
+        
+        # Check CUDA availability
+        try:
+            import torch
+            if torch.cuda.is_available():
+                print(f"\n✅ CUDA is available. CUDA version: {torch.version.cuda}")
+                print(f"   PyTorch CUDA version: {torch.version.cuda}")
+            else:
+                print("\n⚠️  CUDA is not available. Flash-attn requires CUDA.")
+        except ImportError:
+            print("\n⚠️  PyTorch not found. Make sure you have PyTorch installed.")
+        
+        sys.exit(1)
+
+# Check dependencies before proceeding
+check_dependencies()
+
+# Now proceed with the rest of the imports
 import torch
 if torch.version.cuda == '11.8':
     os.environ["TRITON_PTXAS_PATH"] = "/usr/local/cuda-11.8/bin/ptxas"
 
 os.environ['VLLM_USE_V1'] = '0'
-os.environ["CUDA_VISIBLE_DEVICES"] = '0'
+# os.environ["CUDA_VISIBLE_DEVICES"] = '0'
 
 from vllm import AsyncLLMEngine, SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.model_executor.models.registry import ModelRegistry
 import time
-from deepseek_ocr import DeepseekOCRForCausalLM
+
+# Import the model after checking dependencies
+try:
+    from deepseek_ocr import DeepseekOCRForCausalLM
+except ImportError as e:
+    print(f"\n❌ Error importing DeepseekOCRForCausalLM: {e}")
+    print("\nThis might be because flash-attn was not installed correctly.")
+    print("Please check the installation instructions above and try again.")
+    sys.exit(1)
+
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 import numpy as np
 from tqdm import tqdm
@@ -301,3 +358,4 @@ if __name__ == "__main__":
             plt.close()
 
         result.save(f'{OUTPUT_PATH}/result_with_boxes.jpg')
+

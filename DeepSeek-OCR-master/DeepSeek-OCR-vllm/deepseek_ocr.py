@@ -11,12 +11,38 @@ from einops import rearrange, repeat
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.model_executor import SamplingMetadata
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.utils import set_default_torch_dtype
+try:
+    from vllm.model_executor import SamplingMetadata
+except ImportError:
+    from vllm.v1.sample.metadata import SamplingMetadata
+try:
+    from vllm.model_executor.model_loader.utils import set_default_torch_dtype
+except ImportError:
+    # vLLM 0.18+ moved or removed this function
+    # Provide a fallback implementation
+    import torch
+    def set_default_torch_dtype(dtype):
+        torch.set_default_dtype(dtype)
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+
+try:
+    from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                        MultiModalKwargs, NestedTensors)
+except ImportError:
+    # vLLM 0.18+ compatibility
+    from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                        NestedTensors)
+    # Try multiple locations for MultiModalKwargs
+    try:
+        from vllm.multimodal.base import MultiModalKwargs
+    except ImportError:
+        try:
+            from vllm.v1.multimodal import MultiModalKwargs
+        except ImportError:
+            # Last resort - define a placeholder
+            from typing import Dict, Any
+            MultiModalKwargs = Dict[str, Any]
+
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
