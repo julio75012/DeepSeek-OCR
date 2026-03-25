@@ -66,6 +66,8 @@
 
 
 ## Install
+
+### NVIDIA (CUDA)
 >Our environment is cuda11.8+torch2.6.0.
 1. Clone this repository and navigate to the DeepSeek-OCR folder
 ```bash
@@ -78,7 +80,7 @@ conda activate deepseek-ocr
 ```
 3. Packages
 
-- download the vllm-0.8.5 [whl](https://github.com/vllm-project/vllm/releases/tag/v0.8.5) 
+- download the vllm-0.8.5 [whl](https://github.com/vllm-project/vllm/releases/tag/v0.8.5)
 ```Shell
 pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu118
 pip install vllm-0.8.5+cu118-cp38-abi3-manylinux1_x86_64.whl
@@ -86,6 +88,30 @@ pip install -r requirements.txt
 pip install flash-attn==2.7.3 --no-build-isolation
 ```
 **Note:** if you want vLLM and transformers codes to run in the same environment, you don't need to worry about this installation error like: vllm 0.8.5+cu118 requires transformers>=4.51.1
+
+### AMD (ROCm)
+
+For AMD GPUs, install PyTorch with ROCm support instead of CUDA. Flash Attention is not available on AMD, so the script automatically falls back to eager attention.
+
+1. Install [ROCm](https://rocm.docs.amd.com/en/latest/deploy/linux/index.html) for your distro
+2. Set up the environment:
+```bash
+conda create -n deepseek-ocr python=3.12.9 -y
+conda activate deepseek-ocr
+```
+3. Install PyTorch with ROCm:
+```Shell
+pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2
+pip install -r requirements.txt
+```
+4. For unsupported AMD GPUs (e.g. integrated Radeon 780M), set the GFX version override:
+```bash
+# Find your GPU's gfx version with: rocminfo | grep gfx
+# Then set the override to the nearest supported version
+export HSA_OVERRIDE_GFX_VERSION=11.0.0  # example for gfx1103 (RDNA3)
+```
+
+**Note:** vLLM does not currently support AMD GPUs. Use the Transformers inference path instead.
 
 ## vLLM-Inference
 - VLLM:
@@ -163,24 +189,30 @@ for output in model_outputs:
     print(output.outputs[0].text)
 ```
 ## Transformers-Inference
-- Transformers
+- Transformers (works on both NVIDIA CUDA and AMD ROCm)
 ```python
 from transformers import AutoModel, AutoTokenizer
 import torch
-import os
-os.environ["CUDA_VISIBLE_DEVICES"] = '0'
+
 model_name = 'deepseek-ai/DeepSeek-OCR'
 
+# Auto-detect: flash_attention_2 on NVIDIA, eager on AMD/CPU
+is_amd = hasattr(torch.version, 'hip')
+attn_impl = 'eager' if is_amd or not torch.cuda.is_available() else 'flash_attention_2'
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-model = AutoModel.from_pretrained(model_name, _attn_implementation='flash_attention_2', trust_remote_code=True, use_safetensors=True)
-model = model.eval().cuda().to(torch.bfloat16)
+model = AutoModel.from_pretrained(model_name, _attn_implementation=attn_impl, trust_remote_code=True, use_safetensors=True)
+model = model.eval().to(device)
+if device.type == 'cuda':
+    model = model.to(torch.bfloat16)
 
 # prompt = "<image>\nFree OCR. "
 prompt = "<image>\n<|grounding|>Convert the document to markdown. "
 image_file = 'your_image.jpg'
 output_path = 'your/output/dir'
 
-res = model.infer(tokenizer, prompt=prompt, image_file=image_file, output_path = output_path, base_size = 1024, image_size = 640, crop_mode=True, save_results = True, test_compress = True)
+res = model.infer(tokenizer, prompt=prompt, image_file=image_file, output_path=output_path, base_size=1024, image_size=640, crop_mode=True, save_results=True, test_compress=True)
 ```
 or you can
 ```Shell
